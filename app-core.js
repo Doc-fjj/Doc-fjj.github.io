@@ -595,6 +595,24 @@ const DouyinHot = {
   ],
   /** 静态数据文件路径（GitHub Actions 定时更新） */
   STATIC_URL: './douyin-hot.json',
+  /** 内置兜底数据（当所有在线源和静态文件都不可用时使用） */
+  FALLBACK_DATA: [
+    {title:"养养窃家，我归来清算",hot_value:8500000,label:"热"},
+    {title:"毕业当天，我当众曝光了女友",hot_value:7200000,label:"热"},
+    {title:"原来他藏了十年的秘密是我",hot_value:6800000,label:"推荐"},
+    {title:"追妻火葬场后她不回头了",hot_value:5900000,label:"热"},
+    {title:"假千金身份曝光当天我黑化了",hot_value:5500000,label:"新"},
+    {title:"离婚后前夫跪求复合",hot_value:5100000,label:"热"},
+    {title:"重生回到结婚前一天",hot_value:4800000,label:"推荐"},
+    {title:"被退婚后嫁给了他叔",hot_value:4500000,label:"热"},
+    {title:"全家瞒着我我是首富女儿",hot_value:4200000,label:"新"},
+    {title:"订婚宴上他牵了别人手",hot_value:3900000,label:"热"},
+    {title:"带球跑五年后被堵门了",hot_value:3600000,label:"推荐"},
+    {title:"替嫁后总裁每天宠上天",hot_value:3400000,label:"热"},
+    {title:"发现闺蜜和男友在一起",hot_value:3100000,label:"热"},
+    {title:"穿越成恶毒女配我摆烂了",hot_value:2900000,label:"新"},
+    {title:"隐婚三年老公是顶头上司",hot_value:2700000,label:"推荐"}
+  ],
   /** 缓存key */
   CACHE_KEY: 'douyin_hot_cache',
   /** 缓存有效期（毫秒）- 2小时 */
@@ -657,6 +675,9 @@ const DouyinHot = {
     // 3) 尝试本地缓存（可能过期但总比没有好）
     const cached = this.getCache();
     if (cached) return Object.assign({}, cached, { source: 'cache(已过期)' });
+    // 4) 内置兜底数据（确保永远有数据显示）
+    console.warn('[DouyinHot] 使用内置兜底数据');
+    return { list: this.FALLBACK_DATA.slice(0, limit), updateTime: '', source: 'builtin' };
     // 全部失败
     throw new Error('所有数据源均不可用，请稍后重试');
   },
