@@ -582,3 +582,63 @@ const Exporter = {
     fr.readAsText(file);
   }
 };
+
+/* ===== 抖音热榜（女频爆点素材库自动更新） ===== */
+const DouyinHot = {
+  /** 抖音热搜 API（免费，返回 rank/title/hot_value/label） */
+  API: 'https://api.auth.top/api/dyhot',
+  KEY: '4da4fdcd5dc8cdb1',
+  /** 获取热榜数据，返回 Promise<{list, updateTime}> 或 reject */
+  async fetch(limit) {
+    limit = limit || 20;
+    const url = this.API + '?key=' + this.KEY + '&limit=' + limit;
+    const resp = await fetch(url, { signal: AbortSignal.timeout(15000) });
+    if (!resp.ok) throw new Error('HTTP ' + resp.status);
+    const j = await resp.json();
+    if (j.code !== 0) throw new Error(j.msg || '接口异常');
+    return { list: (j.data || []), updateTime: j.update_time || '' };
+  },
+  /** 将抖音热榜条目映射为 tropes 记录格式 */
+  mapToTropes(item) {
+    return {
+      title: item.title || '',
+      ttype: this.guessType(item.title),
+      content: '热度: ' + (item.hot_value_format || Number(item.hot_value || 0).toLocaleString())
+        + (item.label ? ' | 标签: ' + item.label : '')
+        + (item.sentence_id ? ' | 句子ID: ' + item.sentence_id : ''),
+      heat: Number(item.hot_value) || 0,
+      date: todayStr(),
+      source: '抖音热榜'
+    };
+  },
+  /** 根据标题关键词猜测女频素材类型 */
+  guessType(title) {
+    const s = (title || '').toLowerCase();
+    if (/恋爱|结婚|离婚|男友|女友|老公|老婆|相亲|告白|求婚|前任|复合|出轨|小三|婆媳|丈母娘|催婚|秀恩爱|撒狗粮|甜宠|虐恋|追妻|火葬场/.test(s)) return '情感爆点';
+    if (/打脸|反转|真相|揭秘|原来|竟然|居然|没想到|谁想到|万万没|打脸|爽文|复仇|逆袭|洗白/.test(s)) return '误会反转';
+    if (/身份|隐藏|秘密|真实|原来是他|竟是|大佬|首富|总裁|少爷|公主|女王|陛下/.test(s)) return '身份揭露';
+    if (/金句|语录|文案|一句话|扎心|治愈|温暖|感动|泪目|破防/.test(s)) return '金句';
+    if (/开篇|开局|第一章|新书|连载|更新|首发|上线/.test(s)) return '开篇钩子';
+    if (/名场面|高光|名台词|经典|封神|绝了|炸裂|燃/.test(s)) return '打脸名场面';
+    return '其他';
+  },
+  /** 一键同步：拉取热榜 → 去重 → 写入 tropes 集合 */
+  async syncToTropes(limit) {
+    const data = await this.fetch(limit);
+    const existing = DB.list('tropes');
+    const existingTitles = new Set(existing.map((t) => (t.title || '').trim()));
+    let added = 0, skipped = 0;
+    const recs = [];
+    data.list.forEach((item) => {
+      const t = (item.title || '').trim();
+      if (!t || existingTitles.has(t)) { skipped++; return; }
+      const rec = Object.assign({ id: uid() }, this.mapToTropes(item));
+      recs.push(rec);
+      added++;
+    });
+    if (recs.length > 0) {
+      DB.batch(() => { recs.forEach((r) => DB.upsert('tropes', r)); });
+    }
+    return { added, skipped, total: data.list.length, updateTime: data.updateTime };
+  }
+};
