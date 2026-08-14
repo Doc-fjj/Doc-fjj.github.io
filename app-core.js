@@ -585,28 +585,90 @@ const Exporter = {
 
 /* ===== 抖音热榜（女频爆点素材库自动更新） ===== */
 const DouyinHot = {
-  /** 抖音热搜 API（免费，返回 rank/title/hot_value/label） */
-  API: 'https://api.auth.top/api/dyhot',
-  KEY: '4da4fdcd5dc8cdb1',
-  /** 获取热榜数据，返回 Promise<{list, updateTime}> 或 reject */
-  async fetch(limit) {
-    limit = limit || 20;
-    const url = this.API + '?key=' + this.KEY + '&limit=' + limit;
-    const resp = await fetch(url, { signal: AbortSignal.timeout(15000) });
+  /** 多源API列表（按优先级排序，自动fallback） */
+  APIS: [
+    { name: '云策', url: 'https://api.auth.top/api/dyhot', key: '4da4fdcd5dc8cdb1', needKey: true },
+    { name: '今夕', url: 'https://api.j4u.ink/api/douyin-hot', needKey: false },
+    { name: '极客', url: 'https://api.kekc.cn/api/douyinhot', needKey: false },
+    { name: '热榜', url: 'https://hot.ilaoa.com/douyin', needKey: false },
+    { name: ' PearTrue', url: 'https://api.pearktrue.cn/api/douyin/hot/', needKey: false }
+  ],
+  /** 静态数据文件路径（GitHub Actions 定时更新） */
+  STATIC_URL: './douyin-hot.json',
+  /** 缓存key */
+  CACHE_KEY: 'douyin_hot_cache',
+  /** 缓存有效期（毫秒）- 2小时 */
+  CACHE_TTL: 2 * 60 * 60 * 1000,
+  /** 获取缓存（如果未过期） */
+  getCache() {
+    try {
+      const raw = localStorage.getItem(this.CACHE_KEY);
+      if (!raw) return null;
+      const c = JSON.parse(raw);
+      if (Date.now() - c.ts < this.CACHE_TTL) return c.data;
+      localStorage.removeItem(this.CACHE_KEY);
+    } catch(e) {}
+    return null;
+  },
+  /** 写入缓存 */
+  setCache(data) {
+    try { localStorage.setItem(this.CACHE_KEY, JSON.stringify({ data, ts: Date.now() })); } catch(e) {}
+  },
+  /** 从静态JSON读取（GitHub Actions 定时更新的兜底数据） */
+  async fetchStatic() {
+    try {
+      const resp = await fetch(this.STATIC_URL, { signal: AbortSignal.timeout(8000) });
+      if (!resp.ok) return null;
+      const j = await resp.json();
+      if (j.list && j.list.length > 0) return { list: j.list, updateTime: j.updateTime || '', source: 'static' };
+    } catch(e) {}
+    return null;
+  },
+  /** 尝试单个API源 */
+  async tryApi(api, limit) {
+    const url = api.needKey ? (api.url + '?key=' + api.key + '&limit=' + limit) : (api.url + '?limit=' + limit);
+    const resp = await fetch(url, { signal: AbortSignal.timeout(10000) });
     if (!resp.ok) throw new Error('HTTP ' + resp.status);
     const j = await resp.json();
-    if (j.code !== 0) throw new Error(j.msg || '接口异常');
-    return { list: (j.data || []), updateTime: j.update_time || '' };
+    // 兼容多种返回格式
+    let list = [];
+    if (j.code === 0 && Array.isArray(j.data)) list = j.data;
+    else if (Array.isArray(j.data)) list = j.data;
+    else if (Array.isArray(j.list)) list = j.list;
+    else if (Array.isArray(j)) list = j;
+    if (list.length === 0) throw new Error('空数据');
+    return { list: list.slice(0, limit), updateTime: j.update_time || j.updateTime || '', source: api.name };
+  },
+  /** 获取热榜数据：多源fallback → 静态JSON → 缓存 */
+  async fetch(limit) {
+    limit = limit || 20;
+    // 1) 先尝试各在线API
+    for (const api of this.APIS) {
+      try {
+        const data = await this.tryApi(api, limit);
+        this.setCache(data); // 成功则缓存
+        return data;
+      } catch(e) { console.warn('[DouyinHot] ' + api.name + ' 失败:', e.message); continue; }
+    }
+    // 2) 尝试静态JSON文件（GitHub Actions 更新）
+    console.warn('[DouyinHot] 所有API失败，尝试静态数据...');
+    const staticData = await this.fetchStatic();
+    if (staticData) { this.setCache(staticData); return staticData; }
+    // 3) 尝试本地缓存（可能过期但总比没有好）
+    const cached = this.getCache();
+    if (cached) return Object.assign({}, cached, { source: 'cache(已过期)' });
+    // 全部失败
+    throw new Error('所有数据源均不可用，请稍后重试');
   },
   /** 将抖音热榜条目映射为 tropes 记录格式 */
   mapToTropes(item) {
+    const hotVal = Number(item.hot_value || item.hotValue || item.hot || item.hot_value_format || 0);
     return {
-      title: item.title || '',
-      ttype: this.guessType(item.title),
-      content: '热度: ' + (item.hot_value_format || Number(item.hot_value || 0).toLocaleString())
-        + (item.label ? ' | 标签: ' + item.label : '')
-        + (item.sentence_id ? ' | 句子ID: ' + item.sentence_id : ''),
-      heat: Number(item.hot_value) || 0,
+      title: item.title || item.word || '',
+      ttype: this.guessType(item.title || item.word || ''),
+      content: '热度: ' + hotVal.toLocaleString()
+        + (item.label ? ' | 标签: ' + item.label : ''),
+      heat: hotVal,
       date: todayStr(),
       source: '抖音热榜'
     };
@@ -630,7 +692,7 @@ const DouyinHot = {
     let added = 0, skipped = 0;
     const recs = [];
     data.list.forEach((item) => {
-      const t = (item.title || '').trim();
+      const t = (item.title || item.word || '').trim();
       if (!t || existingTitles.has(t)) { skipped++; return; }
       const rec = Object.assign({ id: uid() }, this.mapToTropes(item));
       recs.push(rec);
@@ -639,6 +701,6 @@ const DouyinHot = {
     if (recs.length > 0) {
       DB.batch(() => { recs.forEach((r) => DB.upsert('tropes', r)); });
     }
-    return { added, skipped, total: data.list.length, updateTime: data.updateTime };
+    return { added, skipped, total: data.list.length, updateTime: data.updateTime, source: data.source };
   }
 };
