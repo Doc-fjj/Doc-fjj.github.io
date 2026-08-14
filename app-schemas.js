@@ -292,10 +292,12 @@ const SCHEMAS = {
     fields: [
       { k: 'title', l: '素材标题', t: 'text', req: 1 },
       { k: 'ttype', l: '类型', t: 'select', opts: ['开篇钩子', '打脸名场面', '情感爆点', '误会反转', '身份揭露', '金句', '其他'] },
-      { k: 'content', l: '素材内容', t: 'textarea', req: 1 },
-      { k: 'date', l: '收录日期', t: 'date', def: () => todayStr() }
+      { k: 'content', l: '素材内容/热度摘要', t: 'textarea', req: 1 },
+      { k: 'heat', l: '热度值', t: 'number', def: () => 0, ph: '抖音热度指数（自动获取或手动填写）' },
+      { k: 'date', l: '收录日期', t: 'date', def: () => todayStr() },
+      { k: 'source', l: '数据来源', t: 'select', opts: ['手动录入', '抖音热榜', '其他'], def: () => '手动录入' }
     ],
-    cols: ['title', 'ttype', 'content']
+    cols: ['title', 'ttype', 'heat', 'content', 'source']
   },
   novelprogress: {
     title: '写作进度', icon: '✍️', global: true,
