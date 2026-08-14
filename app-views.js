@@ -129,7 +129,14 @@ function tableHTML(colKey, rows, extraCols) {
       const cls = good.includes(v) ? 'green' : warn.includes(v) ? 'blue' : 'gray';
       v = '<span class="tag ' + cls + '">' + esc(v === true ? '是' : v === false ? '否' : v) + '</span>';
     } else if (k === 'priority') v = '<span class="tag ' + (String(v).startsWith('P0') ? 'red' : String(v).startsWith('P1') ? 'orange' : 'gray') + '">' + esc(v) + '</span>';
-    else if (typeof v === 'boolean') v = v ? '✔' : '—';
+    else if (k === 'heat' && Number(v) > 0) {
+      const hv = Number(v);
+      v = hv >= 10000000 ? (hv / 10000).toFixed(0) + '万' : hv >= 10000 ? (hv / 10000).toFixed(1) + '万' : String(hv);
+      v = '<span style="color:#e74c3c;font-weight:600">🔥 ' + esc(v) + '</span>';
+    } else if (k === 'source') {
+      const sc = { '抖音热榜': 'red', '手动录入': 'gray', '其他': 'blue' };
+      v = '<span class="tag ' + (sc[v] || 'gray') + '">' + esc(v || '手动录入') + '</span>';
+    } else if (typeof v === 'boolean') v = v ? '✔' : '—';
     else v = esc(v == null ? '' : String(v)).slice(0, 80);
     return '<td>' + (v === '' ? '<span class="muted">—</span>' : v) + '</td>';
   }).join('') + '</tr>').join('');
@@ -953,10 +960,36 @@ Views['sidejob'] = subtabsView([
         const wrap = $('#novTables', el);
         [['novelprogress', '✍️ 写作进度(字数/存稿/投稿节点)'], ['inspirations', '✨ 灵感标签库'], ['tropes', '🔥 女频爆点素材库']].forEach(([k, t2]) => {
           const box = document.createElement('div'); box.className = 'card';
-          box.innerHTML = '<h3>' + t2 + '<span class="more" data-add="' + k + '">＋ 新增</span></h3>' + tableHTML(k, DB.list(k).sort((a, b) => String(b.date || '').localeCompare(String(a.date || ''))).slice(0, 50));
+          const isTropes = (k === 'tropes');
+          box.innerHTML = '<h3>' + t2
+            + '<span class="more" data-add="' + k + '">＋ 新增</span>'
+            + (isTropes ? '<span class="more" id="refreshDouyin" style="color:#e74c3c;cursor:pointer" title="从抖音热榜自动获取最新爆点素材">🔄 抖音刷新</span>' : '')
+            + '</h3>' + tableHTML(k, DB.list(k).sort((a, b) => {
+              if (k === 'tropes') return Number(b.heat || 0) - Number(a.heat || 0); /* 按热度降序 */
+              return String(b.date || '').localeCompare(String(a.date || ''));
+            }).slice(0, 50));
           wrap.appendChild(box);
         });
         $$('[data-add]', el).forEach((x) => x.onclick = () => openForm(x.dataset.add));
+        /* 抖音热榜刷新按钮 */
+        const refreshBtn = $('#refreshDouyin', el);
+        if (refreshBtn) {
+          refreshBtn.onclick = async () => {
+            if (refreshBtn.dataset.loading === '1') return;
+            refreshBtn.dataset.loading = '1';
+            refreshBtn.textContent = '⏳ 获取中...';
+            try {
+              const r = await DouyinHot.syncToTropes(20);
+              toast('抖音热榜同步完成 ✅ 新增 ' + r.added + ' 条 · 跳过重复 ' + r.skipped + ' 条（更新时间: ' + (r.updateTime || '') + '）');
+              App.rerender();
+            } catch (e) {
+              toast('抖音热榜获取失败: ' + (e.message || '网络异常'), 'err');
+            } finally {
+              refreshBtn.dataset.loading = '';
+              refreshBtn.textContent = '🔄 抖音刷新';
+            }
+          };
+        }
         bindTableEdit(el);
       }
     }
@@ -1809,6 +1842,45 @@ function importDmIssues(sheets, dryRun) {
   return { added, updated: 0, bad, preview, skip, summary, news, t2Count: t2 ? dmIssParseTable2(t2).length : 0, t3Count: t3 ? dmIssParseTable3(t3, reportDate).length : 0, month };
 }
 
+/* ===== 测压项目类别（用于从施工量台账自动筛选） ===== */
+const CEYA_KEYWORDS = [
+  '不停井分层测压', '点测', '二流量试井', '其他测油水井测压',
+  '提泵测压', '尾管测试', '注水井压降', '压力恢复', '不稳定试井',
+  '流压测试', '静压测试', '分层测压', '系统试井'
+];
+/** 从 dm-workload 中筛选当月测压类项目 */
+function ceyaFromWorkload(month) {
+  const m = month || monthStr();
+  const all = dmList('dm-workload');
+  return all.filter((r) => {
+    if (monthStr(r.date) !== m) return false;
+    const proj = (r.project || '').trim();
+    if (!proj) return false;
+    return CEYA_KEYWORDS.some((kw) => proj.indexOf(kw) >= 0);
+  });
+}
+/** 将 workload 记录转换为 dmCeyaPlan 格式 */
+function ceyaConvertWl(wl) {
+  return {
+    well: wl.wellNo || '',
+    category: '开发试井',
+    monitorItem: wl.project || '',
+    workContent: wl.project || '',
+    company: wl.team || '',
+    team: wl.subTeam || '',
+    planDate: wl.planDate || '',
+    startDate: wl.date || '',
+    endDate: wl.endDate || '',
+    trips: Number(wl.completed) || 0,
+    emptyRuns: 0,
+    wellType: '',
+    area: wl.area || '',
+    block: '',
+    note: (wl.status || '') + (wl.note ? ' · ' + wl.note : ''),
+    source: '施工量台账同步'
+  };
+}
+
 /* ===== 测压计划完成情况统计表(完成情况统计 + 明细) 导入 ===== */
 function ceyaPlanFindMonth(aoa) {
   for (const row of aoa.slice(0, 4)) {
@@ -2020,6 +2092,9 @@ Views['dm-ceya-plan'] = {
   state: { month: monthStr(), area: '', company: '' },
   render(el, self) {
     const qMonth = self.state.month || monthStr();
+    /* 从施工量台账自动筛选当月测压类项目 */
+    const wlCeya = ceyaFromWorkload(qMonth);
+    const wlCeyaIds = new Set(wlCeya.map((r) => r.id));
     const sumMap = DB.setting('dmCeyaSummary', {});
     const sum = sumMap[qMonth] || null;
     let rows = dmList('dmCeyaPlan').filter((x) => x.impMonth === qMonth || !x.impMonth);
@@ -2040,6 +2115,7 @@ Views['dm-ceya-plan'] = {
       + '<span class="sp"></span>'
       + '<button class="btn sm" id="impCeya">📥 导入测压计划表</button>'
       + '<input type="file" id="impCeyaFile" accept=".xlsx,.xls,.csv" style="display:none">'
+      + '<button class="btn sm" id="syncWl">🔗 从施工量台账同步</button>'
       + '<button class="btn sm" id="expCeya">导出Excel</button>'
       + '<button class="btn primary" id="addCeya">＋ 新增井记录</button></div>'
       + '<div class="grid g4" style="margin-bottom:14px">'
@@ -2048,6 +2124,19 @@ Views['dm-ceya-plan'] = {
       + statCard('完成率', rate + '%', '计划 ' + totalPlan + ' 口')
       + statCard('未完成井次', unfinished + ' 口', unfinished > 0 ? '需考核跟进' : '全部完成')
       + '</div>'
+      /* ===== 从施工量台账自动匹配的测压项目 ===== */
+      + (wlCeya.length ? '<div class="card" style="margin-bottom:14px;border-left:4px solid #9b59b6"><h3>🔗 施工量台账 · 测压类项目（' + qMonth + '，共 ' + wlCeya.length + ' 口）</h3><div class="muted small" style="margin-bottom:8px">以下为「动态监测施工量台账」中自动筛选的测压类项目（匹配：不停井分层测压/点测/二流量试井/提泵测压/尾管测试/注水井压降等），点击「同步到本模块」可一键导入。</div><div class="table-wrap"><table><thead><tr><th><input type="checkbox" id="wlCeyaAll" checked></th><th>井号</th><th>测试项目/作业内容</th><th>作业区</th><th>施工队伍</th><th>计划日期</th><th>开始日期</th><th>上井次数</th><th>状态</th></tr></thead><tbody>'
+        + wlCeya.map((r) => '<tr data-wl-id="' + r.id + '"><td><input type="checkbox" class="wl-cb" data-id="' + r.id + '" checked></td>'
+          + '<td>' + esc(r.wellNo || '') + '</td>'
+          + '<td>' + esc(r.project || '') + '</td>'
+          + '<td>' + esc(r.area || '') + '</td>'
+          + '<td class="muted small">' + esc(r.team || '') + '</td>'
+          + '<td class="muted small">' + (r.planDate || '—') + '</td>'
+          + '<td>' + (r.date || '—') + '</td>'
+          + '<td>' + (r.completed || 0) + '</td>'
+          + '<td><span class="tag ' + ((r.status === '完成' || !r.status) ? 'green' : (r.status === '进行中' ? 'orange' : 'gray')) + '">' + (r.status || '完成') + '</span></td></tr>').join('')
+        + '</tbody></table></div></div>'
+        : '<div class="hint" style="margin:0 0 12px">🔗 当月（' + qMonth + '）施工量台账中暂无测压类项目，或尚未导入施工量台账数据。</div>')
       + (sum ? '<div class="card" style="margin-bottom:14px"><h3>📊 按作业区完成情况（' + qMonth + '）</h3><div class="table-wrap"><table><thead><tr><th>作业区</th><th>计划</th><th>完成</th><th>完成率</th><th>采油井(计/完)</th><th>注水(计/完)</th><th>考核备注</th></tr></thead><tbody>'
         + areas.map((a) => {
             const r = a.plan ? Math.round(a.done / a.plan * 100) : 0;
@@ -2112,6 +2201,46 @@ Views['dm-ceya-plan'] = {
         };
       });
     };
+    /* 从施工量台账同步测压数据 */
+    $('#syncWl', el).onclick = () => {
+      const wl = ceyaFromWorkload(qMonth);
+      if (!wl.length) { toast('当月（' + qMonth + '）施工量台账中无测压类项目', 'err'); return; }
+      const cbs = $$('.wl-cb:checked', el);
+      const ids = new Set(cbs.map((cb) => cb.dataset.id));
+      const selected = wl.filter((r) => ids.has(r.id));
+      if (!selected.length) { toast('请至少勾选一条记录', 'err'); return; }
+      Modal.open('<h3>🔗 从施工量台账同步测压数据</h3>'
+        + '<div class="grid g3" style="margin-bottom:12px">'
+        + statCard('待同步', selected.length + ' 口', qMonth)
+        + statCard('匹配总数', wl.length + ' 口', '测压类项目')
+        + statCard('目标模块', 'dmCeyaPlan', '井记录')
+        + '</div>'
+        + '<div class="card imp-detail">' + selected.slice(0, 20).map((r) => '<div class="imp-row"><span class="tag t-add">新增</span> '
+          + esc(r.wellNo || '') + ' · ' + esc(r.project || '') + ' · ' + esc(r.area || '') + '</div>').join('')
+        + (selected.length > 20 ? '<div class="muted small" style="margin-top:4px">… 还有 ' + (selected.length - 20) + ' 条</div>' : '')
+        + '</div>'
+        + '<div class="modal-acts"><button class="btn" id="syncWlCancel">取消</button><button class="btn primary" id="syncWlConfirm">确认同步（' + selected.length + ' 条）</button></div>');
+      $('#syncWlCancel').onclick = Modal.close;
+      $('#syncWlConfirm').onclick = () => {
+        let added = 0;
+        DB.batch(() => {
+          selected.forEach((wlRec) => {
+            const rec = ceyaConvertWl(wlRec);
+            rec.id = uid();
+            rec.src = 'workload-sync';
+            rec.impMonth = qMonth;
+            DB.upsert('dmCeyaPlan', rec);
+            added++;
+          });
+        });
+        Modal.close();
+        toast('同步完成 ✅ 已从施工量台账导入 ' + added + ' 条测压项目到本模块（' + qMonth + '）');
+        App.rerender();
+      };
+    };
+    /* 全选/取消全选 */
+    const wlAllCb = $('#wlCeyaAll', el);
+    if (wlAllCb) wlAllCb.onchange = (e) => { $$('.wl-cb', el).forEach((cb) => cb.checked = e.target.checked); };
     bindTableEdit(el);
     const expRows = (set) => {
       const heads = ['井号', '类别', '监测项目', '作业内容', '技术服务公司', '测试小队名称', '计划下达时间', '开始日期', '结束日期', '上井次数', '空跑次数', '井别', '作业区', '区块', '备注', '来源'];
